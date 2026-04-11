@@ -1,6 +1,15 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import type { Destination, Route, DaySchedule, BudgetItem } from '@/types'
+import { isFirebaseConfigured } from '@/lib/firebase'
+import {
+  fsDeleteBudgetItem,
+  fsDeleteTrip,
+  fsListBudgetItems,
+  fsListTrips,
+  fsSaveBudgetItem,
+  fsSaveTrip
+} from '@/lib/firestoreSync'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api'
 
@@ -165,12 +174,16 @@ export const useTripStore = defineStore('trip', () => {
   async function addBudgetItem(item: BudgetItem) {
     budgetItems.value.push(item)
     try {
-      await apiRequest('/budget', {
-        method: 'POST',
-        body: JSON.stringify(item)
-      })
+      if (isFirebaseConfigured()) {
+        await fsSaveBudgetItem(item)
+      } else {
+        await apiRequest('/budget', {
+          method: 'POST',
+          body: JSON.stringify(item)
+        })
+      }
     } catch (error) {
-      console.warn('Failed to sync budget item to server:', error)
+      console.warn('Failed to sync budget item:', error)
     }
   }
   
@@ -181,9 +194,13 @@ export const useTripStore = defineStore('trip', () => {
       budgetItems.value.splice(index, 1)
     }
     try {
-      await apiRequest(`/budget/${id}`, { method: 'DELETE' })
+      if (isFirebaseConfigured()) {
+        await fsDeleteBudgetItem(id)
+      } else {
+        await apiRequest(`/budget/${id}`, { method: 'DELETE' })
+      }
     } catch (error) {
-      console.warn('Failed to delete budget item on server:', error)
+      console.warn('Failed to delete budget item:', error)
     }
   }
   
@@ -206,7 +223,9 @@ export const useTripStore = defineStore('trip', () => {
     localStorage.setItem('savedRoutes', JSON.stringify(savedRoutes.value))
 
     try {
-      if (existingIndex > -1) {
+      if (isFirebaseConfigured()) {
+        await fsSaveTrip(route)
+      } else if (existingIndex > -1) {
         await apiRequest(`/trips/${route.id}`, {
           method: 'PUT',
           body: JSON.stringify(route)
@@ -218,7 +237,7 @@ export const useTripStore = defineStore('trip', () => {
         })
       }
     } catch (error) {
-      console.warn('Failed to sync route to server:', error)
+      console.warn('Failed to sync route:', error)
     }
   }
   
@@ -248,9 +267,13 @@ export const useTripStore = defineStore('trip', () => {
       localStorage.setItem('savedRoutes', JSON.stringify(savedRoutes.value))
     }
     try {
-      await apiRequest(`/trips/${routeId}`, { method: 'DELETE' })
+      if (isFirebaseConfigured()) {
+        await fsDeleteTrip(routeId)
+      } else {
+        await apiRequest(`/trips/${routeId}`, { method: 'DELETE' })
+      }
     } catch (error) {
-      console.warn('Failed to delete route on server:', error)
+      console.warn('Failed to delete route:', error)
     }
   }
   
@@ -271,6 +294,18 @@ export const useTripStore = defineStore('trip', () => {
 
   async function syncFromServer() {
     try {
+      if (isFirebaseConfigured()) {
+        const [trips, items] = await Promise.all([fsListTrips(), fsListBudgetItems()])
+        if (Array.isArray(trips)) {
+          savedRoutes.value = trips
+          localStorage.setItem('savedRoutes', JSON.stringify(savedRoutes.value))
+        }
+        if (Array.isArray(items)) {
+          budgetItems.value = items
+        }
+        return
+      }
+
       const [tripData, budgetData] = await Promise.all([
         apiRequest<{ trips?: Route[] }>('/trips'),
         apiRequest<{ items?: BudgetItem[] }>('/budget')
@@ -285,7 +320,7 @@ export const useTripStore = defineStore('trip', () => {
         budgetItems.value = budgetData.items
       }
     } catch (error) {
-      console.warn('Failed to fetch initial data from server:', error)
+      console.warn('Failed to fetch initial data:', error)
     }
   }
   

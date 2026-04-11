@@ -1,11 +1,11 @@
-# 内层工程（Root Directory = globaltrip）
-globaltrip/node_modules/
-globaltrip/dist/
-globaltrip/dist-ssr/
-globaltrip/.env
-globaltrip/.env.*
-globaltrip/server/node_modules/
-globaltrip/server/.env
+# 内层工程（Vercel/Render Root Directory = CROSS）
+CROSS/node_modules/
+CROSS/dist/
+CROSS/dist-ssr/
+CROSS/.env
+CROSS/.env.*
+CROSS/server/node_modules/
+CROSS/server/.env
 
 # 系统与编辑器
 .DS_Store

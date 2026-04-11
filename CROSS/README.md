@@ -39,13 +39,13 @@
 
 ```bash
 # 安装前端依赖
-cd globaltrip
+cd CROSS
 npm install
 
 
 ### 运行项目
 
-# 启动前端开发服务器（在 globaltrip 目录）
+# 启动前端开发服务器（在 CROSS 目录）
 npm run dev
 
 
@@ -64,7 +64,7 @@ npm run preview
 ##  项目结构
 
 ```
-globaltrip/
+CROSS/
 ├── src/
 │   ├── components/          # 组件
 │   │   └── MapComponent.vue # 地图组件

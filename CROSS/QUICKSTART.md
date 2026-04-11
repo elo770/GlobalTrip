@@ -5,13 +5,14 @@
 ### 1. 安装前端依赖
 
 ```bash
-cd globaltrip
+cd CROSS
 npm install
 ```
 
 ### 2. 安装后端依赖
 
 ```bash
+# 在 CROSS 目录内
 cd server
 npm install
 ```
@@ -22,7 +23,7 @@ npm install
 
 **终端 1 - 启动前端：**
 ```bash
-cd globaltrip
+cd CROSS
 npm run dev
 ```
 前端将在 http://localhost:3000 运行
