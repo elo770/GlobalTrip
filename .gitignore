@@ -1,0 +1,13 @@
+# 内层工程（Root Directory = globaltrip）
+globaltrip/node_modules/
+globaltrip/dist/
+globaltrip/dist-ssr/
+globaltrip/.env
+globaltrip/.env.*
+globaltrip/server/node_modules/
+globaltrip/server/.env
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+*.log
