@@ -31,3 +31,6 @@ dist-ssr
 # Server
 server/node_modules
 server/.env
+
+# Firebase
+.firebase

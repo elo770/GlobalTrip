@@ -6,7 +6,7 @@
           <span>日程安排</span>
           <el-button type="primary" @click="loadPresetRoute">
             <el-icon><Refresh /></el-icon>
-            加载改革开放路线
+            加载示例：欧洲自由行
           </el-button>
         </div>
       </template>
@@ -28,30 +28,10 @@
             
             <div class="schedule-section">
               <h4>
-                <el-icon><Location /></el-icon>
-                活动安排
-              </h4>
-              <ul class="activity-list">
-                <li v-for="(activity, index) in day.activities" :key="index">
-                  {{ activity }}
-                </li>
-              </ul>
-            </div>
-
-            <div class="schedule-section">
-              <h4>
-                <el-icon><House /></el-icon>
-                住宿
-              </h4>
-              <p>{{ day.accommodation }}</p>
-            </div>
-
-            <div v-if="day.notes" class="schedule-section">
-              <h4>
                 <el-icon><Document /></el-icon>
                 备注
               </h4>
-              <p>{{ day.notes }}</p>
+              <p>{{ day.notes || '暂无备注' }}</p>
             </div>
           </el-card>
         </el-timeline-item>
@@ -59,7 +39,7 @@
 
       <el-empty
         v-else
-        description="请先在「地图规划」添加或调整目的地，日程会随路线自动更新；也可加载示例路线。"
+        description="请先在「路线规划」添加或调整目的地，日程会随路线自动更新；也可加载示例路线。"
       />
     </el-card>
   </div>
@@ -68,7 +48,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useTripStore } from '@/store/trip'
-import { Refresh, Location, House, Document } from '@element-plus/icons-vue'
+import { Refresh, Document } from '@element-plus/icons-vue'
 
 const tripStore = useTripStore()
 
@@ -83,7 +63,7 @@ function formatDate(date: Date) {
 }
 
 function loadPresetRoute() {
-  tripStore.loadPresetRoute('reform-opening')
+  tripStore.loadPresetRoute('europe-free')
 }
 </script>
 
@@ -118,26 +98,6 @@ function loadPresetRoute() {
   gap: 8px;
   margin-bottom: 12px;
   color: #333;
-}
-
-.activity-list {
-  list-style: none;
-  padding: 0;
-}
-
-.activity-list li {
-  padding: 8px 0;
-  padding-left: 24px;
-  position: relative;
-}
-
-.activity-list li::before {
-  content: '•';
-  position: absolute;
-  left: 0;
-  color: #999;
-  font-weight: bold;
-  font-size: 20px;
 }
 </style>
 

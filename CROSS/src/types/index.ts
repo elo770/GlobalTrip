@@ -6,6 +6,10 @@ export interface Destination {
   coordinates: [number, number] // [经度, 纬度]
   highlight?: string
   order: number
+  /** 第几天（用于按天配色/图例） */
+  day?: number
+  /** 当天第几个点（用于点内数字显示） */
+  withinDayOrder?: number
   date?: Date | string
   image?: string
 }
@@ -33,7 +37,7 @@ export interface DaySchedule {
 export interface BudgetItem {
   id: string
   day: number
-  type: '交通' | '住宿' | '餐饮' | '景点' | '购物' | '其他'
+  type: '交通' | '住宿' | '餐饮' | '景点' | '门票' | '购物' | '其他'
   description: string
   amount: number
   currency?: string

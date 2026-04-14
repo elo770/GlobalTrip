@@ -4,7 +4,7 @@
       <div class="header-content">
         <h1 class="logo">
           <el-icon><MapLocation /></el-icon>
-          GlobalTrip Planner
+          越陌CROSS
         </h1>
         <el-menu
           :default-active="activeMenu"
@@ -19,11 +19,11 @@
           </el-menu-item>
           <el-menu-item index="/map">
             <el-icon><MapLocation /></el-icon>
-            <span>地图规划</span>
+            <span>路线规划</span>
           </el-menu-item>
           <el-menu-item index="/schedule">
             <el-icon><Calendar /></el-icon>
-            <span>日程视图</span>
+            <span>日程安排</span>
           </el-menu-item>
           <el-menu-item index="/budget">
             <el-icon><Money /></el-icon>

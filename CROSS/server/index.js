@@ -28,7 +28,7 @@ app.use(
 app.use(express.json({ limit: '2mb' }))
 
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', message: 'GlobalTrip Server is running' })
+  res.json({ status: 'ok', message: 'CROSS Server is running' })
 })
 
 async function main() {

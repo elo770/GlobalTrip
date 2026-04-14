@@ -3,7 +3,7 @@
     <!-- 顶部工具栏 -->
     <div class="top-toolbar">
       <div class="search-container">
-        <POISearch @select="handlePOISelect" />
+        <POISearch :resolve-map-center="resolveMapCenterForPOI" @select="handlePOISelect" />
       </div>
       <div class="toolbar-item" :class="{ active: isAddingPoint }" @click="toggleAddPointMode" title="添加点">
         <el-icon><Location /></el-icon>
@@ -29,16 +29,31 @@
     <div class="map-container">
       <MapComponent ref="mapRef" />
     </div>
-    <div class="sidebar">
+    <div ref="sidebarRef" class="sidebar">
       <div class="sidebar-content">
         <div class="header">
           <div class="card-header">
             <span>路线规划</span>
             <div class="header-buttons">
+              <el-checkbox v-model="showRouteLine" size="small" class="route-line-toggle">
+                显示连线
+              </el-checkbox>
               <el-button type="primary" size="small" @click="loadPresetRoute">
                 <el-icon><Star /></el-icon>
-                加载示例：改革开放
+                加载示例：欧洲自由行
               </el-button>
+            </div>
+          </div>
+          <div v-if="dayLegend.length > 0" class="day-legend">
+            <div
+              v-for="item in dayLegend"
+              :key="item.day"
+              class="day-legend-item"
+              :class="{ active: selectedDay === item.day }"
+              @click="handleLegendClick(item.day)"
+            >
+              <span class="day-legend-dot" :style="{ backgroundColor: item.color }" />
+              <span class="day-legend-text">Day {{ item.day }}</span>
             </div>
           </div>
         </div>
@@ -60,10 +75,26 @@
               v-for="(dest, index) in destinations"
               :key="dest.id"
               class="destination-item"
+              :class="{ 'reorder-mode': isReorderMode, dragging: draggingId === dest.id }"
+              :draggable="isReorderMode"
+              @dragstart="onDragStart($event, dest.id)"
+              @dragover.prevent="onDragOver(dest.id)"
+              @drop.prevent="onDrop(dest.id)"
+              @pointerdown="onLongPressStart(dest.id)"
+              @pointerup="onLongPressEnd"
+              @pointercancel="onLongPressEnd"
+              @pointerleave="onLongPressEnd"
+              @click="focusDestination(dest)"
             >
-              <div class="destination-order">{{ index + 1 }}</div>
+              <div
+                class="destination-order"
+                :style="{ backgroundColor: MORANDI_PALETTE[((dayById.get(dest.id) || 1) - 1) % MORANDI_PALETTE.length] }"
+              >
+                {{ index + 1 }}
+              </div>
               <div class="destination-info">
                 <div class="destination-name">{{ dest.name }}</div>
+                <div class="destination-day-tag">Day {{ dayById.get(dest.id) || 1 }}</div>
                 <div v-if="dest.date" class="destination-date">
                   <el-icon><Calendar /></el-icon>
                   {{ dest.date }}
@@ -78,7 +109,7 @@
                   type="info"
                   size="small"
                   :disabled="index === 0"
-                  @click="moveDestination(index, 'up')"
+                  @click.stop="moveDestination(index, 'up')"
                 >
                   ↑
                 </el-button>
@@ -86,7 +117,7 @@
                   type="info"
                   size="small"
                   :disabled="index === destinations.length - 1"
-                  @click="moveDestination(index, 'down')"
+                  @click.stop="moveDestination(index, 'down')"
                 >
                   ↓
                 </el-button>
@@ -95,14 +126,14 @@
                   :icon="Edit"
                   circle
                   size="small"
-                  @click="editDestination(dest)"
+                  @click.stop="editDestination(dest)"
                 />
                 <el-button
                   type="danger"
                   :icon="Delete"
                   circle
                   size="small"
-                  @click="removeDestination(dest.id)"
+                  @click.stop="removeDestination(dest.id)"
                 />
               </div>
             </div>
@@ -121,7 +152,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import { useTripStore } from '@/store/trip'
 // @ts-ignore
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -132,19 +163,256 @@ import { Star, Delete, Plus, Document, Location, Calendar, Edit } from '@element
 
 const tripStore = useTripStore()
 const mapRef = ref<InstanceType<typeof MapComponent>>()
+const mapCenter = ref<[number, number] | null>(null)
+const sidebarRef = ref<HTMLElement | null>(null)
+let autoFitFrame = 0
+const showRouteLine = ref(true)
+
+// 萌萌马卡龙（与地图点位配色保持一致）
+const MORANDI_PALETTE = [
+  '#7B93C8',
+  '#43C0DA',
+  '#A6D9E8',
+  '#5FA07F',
+  '#A7CB86',
+  '#D7E7C6',
+  '#FFF1A6',
+  '#FFC6AD',
+  '#F3A280',
+  '#F46F4F'
+]
+
+function getSidebarLeftPaddingPx() {
+  // sidebar 实际宽度 + 左侧外边距/留白，再加一点缓冲，避免路线/点被挡住
+  const sidebarWidth = sidebarRef.value?.getBoundingClientRect().width ?? 380
+  return Math.round(sidebarWidth + 80)
+}
+
+function fitBoundsAvoidSidebar() {
+  const map = mapRef.value
+  if (!map || destinations.value.length === 0) return
+  map.updateSize()
+  // 确保源数据已写入（某些进入时序下，地图刚 ready 但还没 setData）
+  map.updateMap(true)
+  map.fitBounds({
+    padding: { top: 50, right: 60, bottom: 50, left: getSidebarLeftPaddingPx() }
+  })
+}
+
+function cancelAutoFitFrame() {
+  if (!autoFitFrame) return
+  cancelAnimationFrame(autoFitFrame)
+  autoFitFrame = 0
+}
+
+function scheduleAutoFit() {
+  const map = mapRef.value
+  if (!map || destinations.value.length === 0) return
+  map.onReady?.(() => {
+    nextTick(() => {
+      cancelAutoFitFrame()
+      autoFitFrame = requestAnimationFrame(() => {
+        autoFitFrame = requestAnimationFrame(() => {
+          autoFitFrame = 0
+          if (destinations.value.length === 0) return
+          fitBoundsAvoidSidebar()
+        })
+      })
+    })
+  })
+}
+
+function focusDestination(dest: Destination) {
+  const map = mapRef.value
+  if (!map) return
+  selectedDay.value = dayById.value.get(dest.id) ?? null
+  map.setHighlightedDay?.(selectedDay.value)
+  const [lng, lat] = dest.coordinates
+  // 通过 offset 让点尽量落在屏幕中间偏右，避开左侧路线栏
+  map.flyToLocation(lng, lat, { offset: [Math.round(getSidebarLeftPaddingPx() / 2), 0] })
+}
+
+/** POI 搜索：优先用地图实例的实时中心，其次为 moveend 同步值，最后默认北京 */
+function resolveMapCenterForPOI(): [number, number] {
+  return mapRef.value?.getMapCenter() ?? mapCenter.value ?? [116.39, 39.9]
+}
 
 const destinations = computed(() => tripStore.destinations)
 const currentRoute = computed(() => tripStore.currentRoute)
 
+const selectedDay = ref<number | null>(null)
+const isReorderMode = ref(false)
+const draggingId = ref<string | null>(null)
+const dragOverId = ref<string | null>(null)
+let longPressTimer: number | null = null
+
+function onLongPressStart(id: string) {
+  if (longPressTimer) window.clearTimeout(longPressTimer)
+  longPressTimer = window.setTimeout(() => {
+    isReorderMode.value = true
+    draggingId.value = id
+  }, 420)
+}
+
+function onLongPressEnd() {
+  if (longPressTimer) {
+    window.clearTimeout(longPressTimer)
+    longPressTimer = null
+  }
+}
+
+function onDragStart(e: DragEvent, id: string) {
+  if (!isReorderMode.value) {
+    e.preventDefault()
+    return
+  }
+  draggingId.value = id
+  e.dataTransfer?.setData('text/plain', id)
+  e.dataTransfer?.setDragImage?.((e.currentTarget as HTMLElement) ?? new Image(), 10, 10)
+}
+
+function onDragOver(id: string) {
+  if (!isReorderMode.value) return
+  dragOverId.value = id
+}
+
+function onDrop(targetId: string) {
+  if (!isReorderMode.value || !draggingId.value) return
+  const fromId = draggingId.value
+  draggingId.value = null
+  dragOverId.value = null
+
+  const dests = [...tripStore.destinations]
+  const fromIndex = dests.findIndex((d) => d.id === fromId)
+  const toIndex = dests.findIndex((d) => d.id === targetId)
+  if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) {
+    isReorderMode.value = false
+    return
+  }
+  const [moved] = dests.splice(fromIndex, 1)
+  dests.splice(toIndex, 0, moved)
+  // 更新全局顺序
+  dests.forEach((d, i) => {
+    d.order = i + 1
+  })
+  tripStore.updateDestinationOrder(dests)
+  // 更新路线
+  const route = {
+    id: currentRoute.value?.id || 'custom-route',
+    name: currentRoute.value?.name || '我的旅行路线',
+    destinations: tripStore.destinations,
+    totalDistance: 0,
+    estimatedDays: tripStore.destinations.length
+  }
+  tripStore.setRoute(route)
+  mapRef.value?.updateMap(true)
+  isReorderMode.value = false
+}
+
+function dateKeyFromDestDate(date: unknown) {
+  if (!date) return ''
+  if (date instanceof Date) return date.toISOString().slice(0, 10)
+  const s = String(date)
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})/)
+  return m?.[1] ?? ''
+}
+
+const dayById = computed(() => {
+  const dests = [...destinations.value].sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+  const dayIndexByKey = new Map<string, number>()
+  let autoDay = 0
+  const map = new Map<string, number>()
+  for (const dest of dests) {
+    const key = dateKeyFromDestDate(dest.date)
+    if (!key) {
+      autoDay += 1
+      map.set(dest.id, autoDay)
+      continue
+    }
+    let idx = dayIndexByKey.get(key)
+    if (!idx) {
+      idx = dayIndexByKey.size + 1
+      dayIndexByKey.set(key, idx)
+    }
+    map.set(dest.id, idx)
+  }
+  return map
+})
+
+const dayLegend = computed(() => {
+  const days = Array.from(
+    new Set(Array.from(dayById.value.values()).filter((n) => Number.isFinite(n) && n > 0))
+  ).sort((a, b) => a - b)
+  return days.slice(0, 12).map((day) => ({
+    day,
+    color: MORANDI_PALETTE[(day - 1) % MORANDI_PALETTE.length]
+  }))
+})
+
+function handleLegendClick(day: number) {
+  const map = mapRef.value
+  if (!map) return
+
+  selectedDay.value = selectedDay.value === day ? null : day
+  map.setHighlightedDay?.(selectedDay.value)
+
+  if (selectedDay.value == null) {
+    scheduleAutoFit()
+    return
+  }
+
+  const points = destinations.value.filter((d) => dayById.value.get(d.id) === selectedDay.value)
+  if (points.length === 0) return
+
+  if (points.length === 1) {
+    const [lng, lat] = points[0].coordinates
+    map.flyToLocation(lng, lat, { offset: [Math.round(getSidebarLeftPaddingPx() / 2), 0], zoom: 14 })
+    return
+  }
+
+  map.fitBounds({
+    padding: { top: 50, right: 60, bottom: 50, left: getSidebarLeftPaddingPx() },
+    duration: 900
+  })
+}
+
 // 添加点模式状态
 const isAddingPoint = ref(false)
 
+// 进入地图页/切换路线时，目的地数据可能晚于地图初始化写入；
+// 当目的地从 0 -> 有数据时，自动刷新并把路线放到可视区域（避开左侧栏）。
+watch(
+  () => ({
+    routeId: currentRoute.value?.id ?? '',
+    points: destinations.value.map((dest) => `${dest.id}:${dest.order}:${dest.coordinates.join(',')}`).join('|')
+  }),
+  () => {
+    if (destinations.value.length > 0) {
+      scheduleAutoFit()
+    } else {
+      cancelAutoFitFrame()
+    }
+  },
+  { flush: 'post' }
+)
+
+watch(
+  showRouteLine,
+  (visible) => {
+    mapRef.value?.setRouteLineVisible?.(visible)
+  },
+  { immediate: true }
+)
+
 function loadPresetRoute() {
-  tripStore.loadPresetRoute('reform-opening')
+  // 默认加载“欧洲自由行”示例
+  tripStore.loadPresetRoute('europe-free')
   if (mapRef.value) {
-    mapRef.value.updateMap()
+    mapRef.value.updateMap(false)
+    // 自动把路线放到画面里，并避开左侧挡板
+    scheduleAutoFit()
   }
-  ElMessage.success('已加载改革开放路线')
+  ElMessage.success('已加载示例：欧洲自由行')
 }
 
 function clearRoute() {
@@ -218,6 +486,9 @@ function removeDestination(id: string) {
 
   if (mapRef.value) {
     mapRef.value.updateMap()
+    if (tripStore.destinations.length > 0) {
+      scheduleAutoFit()
+    }
   }
   ElMessage.success('目的地已删除')
 }
@@ -226,7 +497,21 @@ function editDestination(dest: Destination) {
   const map = mapRef.value
   if (!map) return
 
-  map.openPointForm(dest.coordinates, dest, (data: any) => {
+  const formProps = {
+    id: dest.id,
+    name: dest.name,
+    description: dest.description,
+    image: dest.image,
+    order: dest.order,
+    date:
+      dest.date === undefined
+        ? undefined
+        : dest.date instanceof Date
+          ? dest.date.toISOString().split('T')[0]
+          : String(dest.date)
+  }
+
+  map.openPointForm(dest.coordinates, formProps, (data: any) => {
     tripStore.updateDestination(dest.id, {
       name: data.name,
       description: data.description,
@@ -235,7 +520,7 @@ function editDestination(dest: Destination) {
       image: data.image
     })
     map.updateMap(true)
-    ElMessage.success('点信息已更新')
+    ;(ElMessage as any)({ type: 'success', message: '点信息已更新', duration: 1200 })
   })
 }
 
@@ -354,9 +639,12 @@ function zoomOut() {
 }
 
 function fitBounds() {
-  if (mapRef.value && destinations.value.length > 0) {
-    mapRef.value.fitBounds()
-  }
+  if (!mapRef.value || destinations.value.length === 0) return
+  // 点击“适应”应当强制生效：先停掉任何自动 fit / 高亮，再直接 fit
+  cancelAutoFitFrame()
+  selectedDay.value = null
+  mapRef.value.setHighlightedDay?.(null)
+  fitBoundsAvoidSidebar()
 }
 
 // 处理POI选择
@@ -374,33 +662,45 @@ function handlePOISelect(destination: Destination) {
   }
   tripStore.setRoute(route)
   
-  // 确保地图更新显示新的目的地
-  if (mapRef.value) {
-    mapRef.value.updateMap()
-  }
-  
-  ElMessage.success(`已添加目的地: ${destination.name}`)
-
-  // 更新地图并缩放到新添加的点
-  if (mapRef.value) {
-    mapRef.value.updateMap(false) // 不保持当前视图，自动缩放到新点
+  // 确保地图更新显示新的目的地，并飞向新点
+  const map = mapRef.value
+  if (map) {
+    map.updateMap()
+    const [lng, lat] = destination.coordinates
+    map.flyToLocation(lng, lat, { offset: [Math.round(getSidebarLeftPaddingPx() / 2), 0] })
   }
 
-  ElMessage.success(`已添加景点：${destination.name}`)
+  ElMessage.success(`已添加目的地：${destination.name}`)
 }
 
 onMounted(() => {
   // 确保地图正确初始化
   nextTick(() => {
     const map = mapRef.value
-    if (map) {
-      setTimeout(() => {
+    if (!map) return
+        map.onViewChange((center: [number, number]) => {
+          mapCenter.value = center
+        })
         map.updateSize()
-        map.updateMap()
+        map.updateMap(destinations.value.length === 0)
+        // 进入页面时如果已经有路线/点，自动加载并居中（避开左侧栏）
+    map.onReady?.(() => {
+      map.updateSize()
+      map.updateMap(destinations.value.length === 0)
+      map.setRouteLineVisible?.(showRouteLine.value)
+      if (destinations.value.length > 0) {
+        scheduleAutoFit()
+      }
+    })
         // 注册点击已有要素（点）以弹出编辑表单
         map.onFeatureClick((props: any) => {
           if (!props || !props.id) return
           // props.coordinates 是 lon/lat
+          // 点击点先居中（避开左侧栏），再弹窗编辑
+          map.flyToLocation(props.coordinates[0], props.coordinates[1], {
+            offset: [Math.round(getSidebarLeftPaddingPx() / 2), 0],
+            zoom: 14
+          })
           map.openPointForm(props.coordinates, props, (data: any) => {
             // 将编辑结果更新到 store
             tripStore.updateDestination(props.id, {
@@ -412,12 +712,14 @@ onMounted(() => {
             })
             // 刷新地图并保持当前视图
             map.updateMap(true)
-            ElMessage.success('点信息已更新')
+            ;(ElMessage as any)({ type: 'success', message: '点信息已更新', duration: 1200 })
           })
         })
-      }, 300)
-    }
   })
+})
+
+onBeforeUnmount(() => {
+  cancelAutoFitFrame()
 })
 </script>
 
@@ -512,13 +814,13 @@ onMounted(() => {
   position: absolute;
   top: 0;
   left: 40px; /* 增加左边距，避免遮挡地图控件 */
-  width: 380px;
+  width: 410px;
   z-index: 2;
   border-radius: 8px;
   background: #FFFFFF;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.1);
   overflow: hidden;
-  max-height: calc(100vh - 180px); /* 顶部60px + 底部120px */
+  max-height: calc(100vh - 120px); /* 让侧边栏“长一点点” */
   margin: 20px;
   display: flex;
   flex-direction: column;
@@ -539,6 +841,45 @@ onMounted(() => {
   border-bottom: 1px solid #E0E0E0;
 }
 
+.day-legend {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+}
+
+.day-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid #EAEAEA;
+  border-radius: 999px;
+  background: #FAFAFA;
+  cursor: pointer;
+  user-select: none;
+}
+
+.day-legend-item.active {
+  border-color: #D0D0D0;
+  background: #F2F2F2;
+}
+
+.day-legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid #FFFFFF;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  flex-shrink: 0;
+}
+
+.day-legend-text {
+  font-size: 12px;
+  color: #666;
+  white-space: nowrap;
+}
+
 .card-header {
   display: flex;
   justify-content: space-between;
@@ -554,6 +895,11 @@ onMounted(() => {
 .header-buttons {
   display: flex;
   gap: 8px;
+  align-items: center;
+}
+
+.route-line-toggle {
+  margin-right: 6px;
 }
 
 .action-buttons {
@@ -578,6 +924,15 @@ onMounted(() => {
   border-radius: 6px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
   border: 1px solid #E0E0E0;
+}
+
+.destination-item.reorder-mode {
+  cursor: grab;
+  border-style: dashed;
+}
+
+.destination-item.reorder-mode.dragging {
+  opacity: 0.65;
 }
 
 .destination-order {
@@ -656,6 +1011,17 @@ onMounted(() => {
   font-weight: 600;
   margin-bottom: 4px;
   color: #333;
+}
+
+.destination-day-tag {
+  display: inline-block;
+  margin-bottom: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #F5F5F5;
+  border: 1px solid #E6E6E6;
+  font-size: 12px;
+  color: #666;
 }
 
 .destination-desc {

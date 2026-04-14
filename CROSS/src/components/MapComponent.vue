@@ -1,11 +1,10 @@
 <template>
-  <div id="map" class="map">
-    <!-- 点信息表单弹窗 -->
+  <div id="map" ref="mapContainer" class="map">
     <div v-if="showPointForm" class="point-form-overlay" @click.self="closePointForm">
       <div class="point-form-container">
         <div class="point-form-header">
           <h3>{{ isEditing ? '编辑点信息' : '添加点信息' }}</h3>
-          <button class="close-btn" @click="closePointForm">×</button>
+          <button class="close-btn" @click="closePointForm">x</button>
         </div>
         <div class="point-form-content">
           <div class="form-item">
@@ -14,7 +13,7 @@
           </div>
           <div class="form-item">
             <label>描述:</label>
-            <textarea v-model="pointFormData.description" placeholder="请输入描述（可选）"></textarea>
+            <textarea v-model="pointFormData.description" placeholder="请输入描述(可选)"></textarea>
           </div>
           <div class="form-item">
             <label>日期:</label>
@@ -25,15 +24,15 @@
             <div class="image-upload-container">
               <div v-if="pointFormData.image" class="image-preview-small">
                 <img :src="pointFormData.image" alt="预览图片" class="preview-img-small" />
-                <button class="remove-img-btn" @click.stop="removeImage">×</button>
+                <button class="remove-img-btn" @click.stop="removeImage">x</button>
               </div>
-              <input 
-                type="file" 
-                accept="image/*" 
-                @change="handleImageUpload" 
+              <input
+                type="file"
+                accept="image/*"
+                @change="handleImageUpload"
                 class="image-upload-input"
               >
-              <div class="upload-tip-small">点击上传图片（可选）</div>
+              <div class="upload-tip-small">点击上传图片(可选)</div>
             </div>
           </div>
         </div>
@@ -47,210 +46,437 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, watch } from 'vue'
-import { Map, View } from 'ol'
-import TileLayer from 'ol/layer/Tile'
-import OSM from 'ol/source/OSM'
-import VectorLayer from 'ol/layer/Vector'
-import VectorSource from 'ol/source/Vector'
-import { Style, Stroke, Circle as CircleStyle, Fill, Text } from 'ol/style'
-import { Point, LineString } from 'ol/geom'
-import Feature from 'ol/Feature'
-import { fromLonLat, toLonLat } from 'ol/proj'
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import maplibregl, { LngLatBounds } from 'maplibre-gl'
 import { useTripStore } from '@/store/trip'
 
-const tripStore = useTripStore()
-let map: Map | null = null
-let vectorSource: VectorSource | null = null
-let vectorLayer: VectorLayer<VectorSource> | null = null
-let mapClickHandler: ((coords: [number, number]) => void) | null = null
-let isSelecting = false
-let featureClickHandler: ((props: any) => void) | null = null
-let panEnabled = false
-let pointerDownHandler: ((ev: PointerEvent) => void) | null = null
-let pointerUpHandler: ((ev: PointerEvent) => void) | null = null
+type DestinationFeatureProperties = {
+  id: string
+  name: string
+  description?: string
+  date?: string
+  image?: string
+  order?: number
+  day?: number
+  withinDayOrder?: number
+  label?: number
+  color?: string
+  origLng?: number
+  origLat?: number
+}
 
-// 表单相关状态
+type FeatureClickPayload = DestinationFeatureProperties & {
+  coordinates: [number, number]
+}
+
+const tripStore = useTripStore()
+const maptilerKey = import.meta.env.VITE_MAPTILER_KEY
+const mapContainer = ref<HTMLDivElement | null>(null)
+
+const SOURCE_ID = 'trip-source'
+const POINT_LAYER_ID = 'trip-points'
+const POINT_SHADOW_LAYER_ID = 'trip-points-shadow'
+const LABEL_LAYER_ID = 'trip-point-labels'
+const LINE_LAYER_ID = 'trip-route'
+const HIGHLIGHT_LAYER_ID = 'trip-points-highlight'
+
+let map: maplibregl.Map | null = null
+let mapClickHandler: ((coords: [number, number]) => void) | null = null
+let featureClickHandler: ((props: FeatureClickPayload) => void) | null = null
+let viewChangeHandler: ((center: [number, number]) => void) | null = null
+let readyHandlers: Array<() => void> = []
+let isSelecting = false
+let panEnabled = false
+let pendingUpdate = false
+let highlightedDay: number | null = null
+
+// 萌萌马卡龙（柔和、低冲突）配色
+const MORANDI_PALETTE = [
+  // 参考你给的“常用图表示例”配色条
+  '#7B93C8', // 蓝灰
+  '#43C0DA', // 青蓝
+  '#A6D9E8', // 淡青
+  '#5FA07F', // 青绿
+  '#A7CB86', // 草绿
+  '#D7E7C6', // 浅豆绿
+  '#FFF1A6', // 奶黄
+  '#FFC6AD', // 浅桃
+  '#F3A280', // 浅橘
+  '#F46F4F'  // 橘红
+]
+
+function safeOrderIndexExpr() {
+  // 统一把 order 转成 number，缺失则按 1
+  // index = (order - 1) mod paletteLength
+  return [
+    'mod',
+    ['-', ['coalesce', ['to-number', ['get', 'order']], 1], 1],
+    MORANDI_PALETTE.length
+  ] as any
+}
+
+const circleColorExpr = [
+  'match',
+  safeOrderIndexExpr(),
+  0, MORANDI_PALETTE[0],
+  1, MORANDI_PALETTE[1],
+  2, MORANDI_PALETTE[2],
+  3, MORANDI_PALETTE[3],
+  4, MORANDI_PALETTE[4],
+  5, MORANDI_PALETTE[5],
+  6, MORANDI_PALETTE[6],
+  7, MORANDI_PALETTE[7],
+  8, MORANDI_PALETTE[8],
+  9, MORANDI_PALETTE[9],
+  '#999999'
+] as any
+
+function colorForOrder(order: unknown) {
+  const d = Number(order)
+  const day = Number.isFinite(d) && d > 0 ? d : 1
+  return MORANDI_PALETTE[(day - 1) % MORANDI_PALETTE.length]
+}
+
+function dateKeyFromDestDate(date: unknown) {
+  if (!date) return ''
+  if (date instanceof Date) return date.toISOString().slice(0, 10)
+  const s = String(date)
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})/)
+  return m?.[1] ?? ''
+}
+
 const showPointForm = ref(false)
 const isEditing = ref(false)
 const pointFormData = ref({
   name: '',
   description: '',
   coordinates: [0, 0] as [number, number],
-  date: new Date().toISOString().split('T')[0], // 默认今天
+  date: new Date().toISOString().split('T')[0],
   image: ''
 })
-let pointFormCallback: ((data: any) => void) | null = null
+let pointFormCallback: ((data: typeof pointFormData.value) => void) | null = null
 
 onMounted(() => {
-  // 延迟初始化，确保容器已渲染
   setTimeout(() => {
     initMap()
-    updateMap()
-    // 确保地图大小正确
-    setTimeout(() => {
-      // 使用新的引用避免 TypeScript 警告
-      const m = map
-      if (m) {
-        m.updateSize()
-      }
-    }, 100)
   }, 100)
 })
 
+onBeforeUnmount(() => {
+  if (map) {
+    map.remove()
+    map = null
+  }
+})
+
 function initMap() {
-  vectorSource = new VectorSource()
-  vectorLayer = new VectorLayer({
-    source: vectorSource,
-    style: (feature) => {
-      const geometry = feature.getGeometry()
-      if (geometry instanceof Point) {
-        const order = feature.get('order')
-        return new Style({
-          image: new CircleStyle({
-            radius: 10,
-            fill: new Fill({
-              color: '#999'
-            }),
-            stroke: new Stroke({
-              color: '#FFFFFF',
-              width: 2
-            })
-          }),
-          text: new Text({
-            text: order?.toString() || '',
-            fill: new Fill({ color: '#FFFFFF' }),
-            font: 'bold 12px sans-serif'
-          })
-        })
-      } else if (geometry instanceof LineString) {
-        return new Style({
-          stroke: new Stroke({
-            color: '#666',
-            width: 3
-          })
-        })
-      }
-      return undefined
-    }
-  })
+  if (!mapContainer.value) return
 
-  map = new Map({
-    target: 'map',
-    layers: [
-      new TileLayer({
-        source: new OSM()
-      }),
-      vectorLayer
-    ],
-    view: new View({
-      center: fromLonLat([114.057868, 22.543099]), // 默认中心：深圳
-      zoom: 5,
-      constrainResolution: true // 限制缩放级别为整数
-    })
-  })
-  // 为避免 TypeScript 报错（map 可能为 null），在本作用域使用非空局部变量 m
-  const m = map as Map
-
-  // 添加地图点击事件
-  m.on('click', (event) => {
-    // 调试日志，确认点击与选择状态
-    // eslint-disable-next-line no-console
-    console.debug('[MapComponent] map click, isSelecting=', isSelecting, 'hasHandler=', !!mapClickHandler)
-    if (isSelecting && mapClickHandler) {
-      const coords = toLonLat(event.coordinate) as [number, number]
-      mapClickHandler(coords)
-    }
-  })
-
-  // 添加要素点击事件
-  m.on('singleclick', (event) => {
-    if (!isSelecting && featureClickHandler) {
-      m.forEachFeatureAtPixel(event.pixel, (feature) => {
-        const geometry = feature.getGeometry()
-        if (geometry instanceof Point) {
-          const coords = toLonLat(geometry.getCoordinates()) as [number, number]
-          const props = {
-            id: feature.get('id'),
-            name: feature.get('name'),
-            description: feature.get('description'),
-            coordinates: coords,
-            order: feature.get('order')
+  const style = maptilerKey
+    ? `https://api.maptiler.com/maps/streets-v2/style.json?key=${encodeURIComponent(maptilerKey)}`
+    : {
+        version: 8,
+        sources: {
+          osm: {
+            type: 'raster',
+            tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+            tileSize: 256,
+            attribution: '© OpenStreetMap contributors'
           }
-          featureClickHandler?.(props)
-        }
-        return true
-      })
+        },
+        layers: [
+          {
+            id: 'osm',
+            type: 'raster',
+            source: 'osm'
+          }
+        ]
+      }
+
+  map = new maplibregl.Map({
+    container: mapContainer.value,
+    style,
+    center: [114.057868, 22.543099],
+    zoom: 5,
+    attributionControl: true
+  })
+
+  map.on('load', () => {
+    ensureTripLayers()
+    updateMap()
+    setMapCursor()
+    emitViewCenter()
+    // 通知外部：地图已就绪（例如页面需要在进入路线时自动展示点/路线）
+    const handlers = readyHandlers
+    readyHandlers = []
+    handlers.forEach((fn) => fn())
+  })
+
+  map.on('moveend', () => {
+    emitViewCenter()
+  })
+
+  map.on('click', (event) => {
+    if (isSelecting && mapClickHandler) {
+      mapClickHandler([event.lngLat.lng, event.lngLat.lat])
+      return
+    }
+
+    if (!featureClickHandler || isSelecting || !map) return
+
+    const features = map.queryRenderedFeatures(event.point, { layers: [POINT_LAYER_ID] })
+    const feature = features[0]
+    if (!feature || feature.geometry.type !== 'Point') return
+
+    const coords = feature.geometry.coordinates as [number, number]
+    const props = feature.properties || {}
+    const origLng =
+      props.origLng !== undefined && props.origLng !== null ? Number(props.origLng) : coords[0]
+    const origLat =
+      props.origLat !== undefined && props.origLat !== null ? Number(props.origLat) : coords[1]
+    featureClickHandler({
+      id: String(props.id || ''),
+      name: String(props.name || ''),
+      description: props.description ? String(props.description) : '',
+      date: props.date ? String(props.date) : '',
+      image: props.image ? String(props.image) : '',
+      order: props.order ? Number(props.order) : undefined,
+      coordinates: [origLng, origLat]
+    })
+  })
+}
+
+function ensureTripLayers() {
+  if (!map || map.getSource(SOURCE_ID)) return
+
+  map.addSource(SOURCE_ID, {
+    type: 'geojson',
+    data: emptyFeatureCollection()
+  })
+
+  map.addLayer({
+    id: LINE_LAYER_ID,
+    type: 'line',
+    source: SOURCE_ID,
+    filter: ['==', ['geometry-type'], 'LineString'],
+    layout: {
+      'line-cap': 'round',
+      'line-join': 'round'
+    },
+    paint: {
+      'line-color': '#666666',
+      'line-width': 3,
+      // 虚线：更轻盈的路线视觉
+      'line-dasharray': [1.6, 1.2]
+    }
+  })
+
+  // 点位阴影层：提升对比度与“萌感”
+  map.addLayer({
+    id: POINT_SHADOW_LAYER_ID,
+    type: 'circle',
+    source: SOURCE_ID,
+    filter: ['==', ['geometry-type'], 'Point'],
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 4, 12, 10, 20, 14, 26],
+      'circle-color': '#000000',
+      'circle-opacity': 0.16,
+      'circle-blur': 0.9,
+      'circle-translate': [2, 2]
+    }
+  })
+
+  map.addLayer({
+    id: POINT_LAYER_ID,
+    type: 'circle',
+    source: SOURCE_ID,
+    filter: ['==', ['geometry-type'], 'Point'],
+    paint: {
+      // 随缩放自动变大，避免“看不见点”
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 4, 10, 10, 16, 14, 22],
+      'circle-opacity': 0.95,
+      // 按 day/order 分色（莫兰迪色系），超出调色板长度则循环
+      'circle-color': ['coalesce', ['get', 'color'], '#FF9AA2'],
+      // 不要白色边框：靠阴影层增强可见性
+      'circle-stroke-width': 0
+    }
+  })
+
+  // 高亮层：点击 Day 图例后，仅显示该 day 的更大圆
+  map.addLayer({
+    id: HIGHLIGHT_LAYER_ID,
+    type: 'circle',
+    source: SOURCE_ID,
+    filter: ['all', ['==', ['geometry-type'], 'Point'], ['==', ['get', 'order'], -9999]],
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 4, 16, 10, 24, 14, 30],
+      'circle-opacity': 1,
+      'circle-color': ['coalesce', ['get', 'color'], '#FF9AA2'],
+      // 高亮也不加白边，避免“很丑”
+      'circle-stroke-width': 0
+    }
+  })
+
+  map.addLayer({
+    id: LABEL_LAYER_ID,
+    type: 'symbol',
+    source: SOURCE_ID,
+    filter: ['==', ['geometry-type'], 'Point'],
+    layout: {
+      'text-field': ['to-string', ['get', 'label']],
+      'text-size': ['interpolate', ['linear'], ['zoom'], 4, 13, 10, 16, 14, 18]
+    },
+    paint: {
+      // 数字用灰色，周围靠彩色圆点承载“日期颜色”
+      'text-color': '#333333',
+      // 不要白框：改成轻微深色描边增强可读性
+      'text-halo-color': 'rgba(0,0,0,0.22)',
+      'text-halo-width': 0.9
     }
   })
 }
 
-function updateMap(keepView: boolean = true) {
-  if (!vectorSource || !map) return
-
-  // 保存当前视图状态
-  const currentView = keepView ? {
-    center: map.getView().getCenter(),
-    zoom: map.getView().getZoom()
-  } : null
-
-  vectorSource.clear()
-  const destinations = tripStore.destinations
-
-  if (destinations.length === 0) return
-
-  // 添加目的地标记
-  const features: Feature[] = []
-  const coordinates: number[][] = []
-
-  destinations.forEach((dest) => {
-    const coord = fromLonLat(dest.coordinates)
-    coordinates.push(coord)
-
-    const point = new Point(coord)
-    const feature = new Feature({
-      geometry: point,
-      id: dest.id,
-      name: dest.name,
-      description: dest.description,
-      date: dest.date,
-      image: dest.image,
-      order: dest.order
-    })
-
-    features.push(feature)
+function setHighlightedDay(day: number | null) {
+  highlightedDay = day
+  if (!map) return
+  withReady(() => {
+    if (!map) return
+    const value = highlightedDay == null ? -9999 : highlightedDay
+    map.setFilter(HIGHLIGHT_LAYER_ID, [
+      'all',
+      ['==', ['geometry-type'], 'Point'],
+      ['==', ['coalesce', ['to-number', ['get', 'day']], -9999], value]
+    ] as any)
   })
+}
 
-  // 添加路线
-  if (coordinates.length > 1) {
-    const lineString = new LineString(coordinates)
-    const routeFeature = new Feature({
-      geometry: lineString
-    })
-
-    // 如果需要保持当前视图，恢复之前的视图状态
-    if (currentView && currentView.zoom !== undefined && currentView.center) {
-      map.getView().setCenter(currentView.center)
-      map.getView().setZoom(currentView.zoom)
-    }
-    features.push(routeFeature)
-  }
-
-  vectorSource.addFeatures(features)
-
-  // 只有在不需要保持当前视图时，才调整视图以显示所有目的地
-  if (!keepView && coordinates.length > 0) {
-    const extent = vectorSource.getExtent()
-    if (extent && extent[0] !== Infinity) {
-      map.getView().fit(extent, {
-        padding: [50, 50, 50, 50],
-        duration: 1000
-      })
-    }
+function emptyFeatureCollection() {
+  return {
+    type: 'FeatureCollection' as const,
+    features: []
   }
 }
 
-// 监听目的地变化
+function buildFeatureCollection() {
+  const destinations = [...tripStore.destinations].sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+  // 以日期分组生成 day：同一天同色；未设置日期则按顺序分配不同 day
+  const dayIndexByKey = new Map<string, number>()
+  let autoDay = 0
+  const dayById = new Map<string, number>()
+  for (const dest of destinations) {
+    const key = dateKeyFromDestDate(dest.date)
+    if (!key) {
+      autoDay += 1
+      dayById.set(dest.id, autoDay)
+      continue
+    }
+    let idx = dayIndexByKey.get(key)
+    if (!idx) {
+      idx = dayIndexByKey.size + 1
+      dayIndexByKey.set(key, idx)
+    }
+    dayById.set(dest.id, idx)
+  }
+  // 同坐标点位做轻微“散开”，避免完全重叠看起来像少了点
+  const sameCoordCount = new Map<string, number>()
+  const pointFeatures = destinations.map((dest) => {
+    const [origLng, origLat] = dest.coordinates
+    const key = `${origLng.toFixed(6)},${origLat.toFixed(6)}`
+    const idx = sameCoordCount.get(key) ?? 0
+    sameCoordCount.set(key, idx + 1)
+    // 约 15~30m 的偏移（足够区分，又不会离谱）
+    const step = 0.00022
+    const angle = (idx % 6) * (Math.PI / 3)
+    const ring = Math.floor(idx / 6) + 1
+    const dlng = Math.cos(angle) * step * ring
+    const dlat = Math.sin(angle) * step * ring
+    const lng = origLng + dlng
+    const lat = origLat + dlat
+    return {
+      type: 'Feature' as const,
+      geometry: {
+        type: 'Point' as const,
+        coordinates: [lng, lat]
+      },
+      properties: {
+        id: dest.id,
+        name: dest.name,
+        description: dest.description || '',
+        date: dest.date || '',
+        image: dest.image || '',
+        order: dest.order,
+        day: (dest as any).day ?? dayById.get(dest.id) ?? dest.order,
+        withinDayOrder: (dest as any).withinDayOrder,
+        // 点内数字与左侧列表保持一致：使用全局序号（不按天重置）
+        label: dest.order,
+        color: colorForOrder((dest as any).day ?? dayById.get(dest.id) ?? dest.order),
+        origLng,
+        origLat
+      }
+    }
+  })
+
+  const lineFeature =
+    destinations.length > 1
+      ? [{
+          type: 'Feature' as const,
+          geometry: {
+            type: 'LineString' as const,
+            coordinates: destinations.map((dest) => dest.coordinates)
+          },
+          properties: {}
+        }]
+      : []
+
+  return {
+    type: 'FeatureCollection' as const,
+    features: [...pointFeatures, ...lineFeature]
+  }
+}
+
+function updateMap(keepView = true) {
+  if (!map) return
+  if (!map.isStyleLoaded()) {
+    pendingUpdate = true
+    return
+  }
+
+  ensureTripLayers()
+
+  const source = map.getSource(SOURCE_ID) as maplibregl.GeoJSONSource | undefined
+  if (!source) return
+
+  const data = buildFeatureCollection()
+  source.setData(data)
+  pendingUpdate = false
+
+  if (!keepView) {
+    fitBounds()
+  }
+}
+
+function isMapReady() {
+  return !!(map && map.isStyleLoaded())
+}
+
+function onReady(handler: () => void) {
+  if (isMapReady()) {
+    handler()
+    return
+  }
+  readyHandlers.push(handler)
+}
+
+function withReady(handler: () => void) {
+  onReady(() => {
+    // 地图刚 ready 时，补一次之前被丢弃的 setData
+    if (pendingUpdate) {
+      updateMap(true)
+    }
+    handler()
+  })
+}
+
 watch(
   () => tripStore.destinations,
   () => {
@@ -259,53 +485,77 @@ watch(
   { deep: true }
 )
 
-// 设置地图选择模式
 function setMapSelecting(selecting: boolean) {
   isSelecting = selecting
-  if (map) {
-    // 添加点时显示十字光标；非选择状态下交由平移模式控制手形/抓取样式
-    const viewport = map.getViewport() as HTMLElement
-    viewport.style.cursor = selecting ? 'crosshair' : (panEnabled ? 'grab' : 'default')
-  }
+  if (!map) return
+  map.dragPan[selecting ? 'disable' : (panEnabled ? 'enable' : 'disable')]?.()
+  setMapCursor()
 }
 
-// 启用/禁用平移模式（手形/抓取光标）
 function setPanMode(enable: boolean) {
   panEnabled = enable
   if (!map) return
-  const viewport = map.getViewport()
-  if (enable) {
-    viewport.style.cursor = 'grab'
-    // 当按下时显示 grabbing
-    pointerDownHandler = () => { viewport.style.cursor = 'grabbing' }
-    pointerUpHandler = () => { viewport.style.cursor = 'grab' }
-    viewport.addEventListener('pointerdown', pointerDownHandler)
-    viewport.addEventListener('pointerup', pointerUpHandler)
+
+  if (enable && !isSelecting) {
+    map.dragPan.enable()
+  } else if (!enable && !isSelecting) {
+    map.dragPan.disable()
+  }
+
+  setMapCursor()
+}
+
+function setMapCursor() {
+  if (!map) return
+  const canvas = map.getCanvas()
+  if (isSelecting) {
+    canvas.style.cursor = 'crosshair'
+  } else if (panEnabled) {
+    canvas.style.cursor = 'grab'
   } else {
-    viewport.style.cursor = isSelecting ? 'crosshair' : 'default'
-    if (pointerDownHandler) viewport.removeEventListener('pointerdown', pointerDownHandler)
-    if (pointerUpHandler) viewport.removeEventListener('pointerup', pointerUpHandler)
-    pointerDownHandler = null
-    pointerUpHandler = null
+    canvas.style.cursor = 'default'
   }
 }
 
-// 设置地图点击回调
 function onMapClick(handler: (coords: [number, number]) => void) {
   mapClickHandler = handler
 }
 
-// 设置要素点击回调
-function onFeatureClick(handler: (props: any) => void) {
+function onFeatureClick(handler: (props: FeatureClickPayload) => void) {
   featureClickHandler = handler
 }
 
-// 打开点信息表单
-function openPointForm(coordinates: [number, number], props: any = {}, callback: (data: any) => void) {
+function onViewChange(handler: (center: [number, number]) => void) {
+  viewChangeHandler = handler
+  emitViewCenter()
+}
+
+function getCenter(): [number, number] | null {
+  if (!map) return null
+  const center = map.getCenter()
+  return center ? [center.lng, center.lat] : null
+}
+
+/** 供 POI 搜索等使用：始终返回 [经度, 纬度]（地图未就绪时默认北京） */
+function getMapCenter(): [number, number] {
+  if (!map) return [116.39, 39.9]
+  const c = map.getCenter()
+  return [c.lng, c.lat]
+}
+
+function emitViewCenter() {
+  if (!viewChangeHandler) return
+  const center = getCenter()
+  if (center) {
+    viewChangeHandler(center)
+  }
+}
+
+function openPointForm(coordinates: [number, number], props: Partial<FeatureClickPayload> = {}, callback: (data: typeof pointFormData.value) => void) {
   pointFormData.value = {
     name: props.name || '',
     description: props.description || '',
-    coordinates: coordinates,
+    coordinates,
     date: props.date ? new Date(props.date).toISOString().split('T')[0] : new Date().toISOString().split('T')[0],
     image: props.image || ''
   }
@@ -314,14 +564,12 @@ function openPointForm(coordinates: [number, number], props: any = {}, callback:
   showPointForm.value = true
 }
 
-// 关闭点信息表单
 function closePointForm() {
   showPointForm.value = false
-  // 重置表单
   pointFormData.value = {
     name: '',
     description: '',
-    coordinates: [0, 0] as [number, number],
+    coordinates: [0, 0],
     date: new Date().toISOString().split('T')[0],
     image: ''
   }
@@ -329,17 +577,14 @@ function closePointForm() {
   pointFormCallback = null
 }
 
-// 保存点信息表单
 function savePointForm() {
   if (!pointFormData.value.name.trim()) {
     alert('请输入点名称')
     return
   }
-  
+
   if (pointFormCallback) {
-    pointFormCallback({
-      ...pointFormData.value
-    })
+    pointFormCallback({ ...pointFormData.value })
   }
   closePointForm()
 }
@@ -347,23 +592,20 @@ function savePointForm() {
 function handleImageUpload(event: Event) {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
-  
+
   if (file) {
-    // 检查文件大小（5MB）
     if (file.size > 5 * 1024 * 1024) {
       alert('图片大小不能超过5MB')
       return
     }
-    
-    // 使用FileReader读取图片并转换为Base64
+
     const reader = new FileReader()
     reader.onload = (e) => {
       pointFormData.value.image = e.target?.result as string
     }
     reader.readAsDataURL(file)
   }
-  
-  // 重置文件输入
+
   input.value = ''
 }
 
@@ -371,68 +613,109 @@ function removeImage() {
   pointFormData.value.image = ''
 }
 
-// 地图缩放
 function zoomIn() {
   if (map) {
-    const view = map.getView()
-    const zoom = view.getZoom()
-    if (zoom !== undefined) {
-      view.setZoom(zoom + 1)
-    }
+    map.zoomIn()
   }
 }
 
 function zoomOut() {
   if (map) {
-    const view = map.getView()
-    const zoom = view.getZoom()
-    if (zoom !== undefined) {
-      view.setZoom(zoom - 1)
-    }
+    map.zoomOut()
   }
 }
 
-// 适应范围
-function fitBounds() {
-  if (!vectorSource || !map) return
-  const destinations = tripStore.destinations
-  if (destinations.length === 0) return
+type FitBoundsOptions = {
+  padding?: number | { top: number; right: number; bottom: number; left: number }
+  duration?: number
+  /** 单点场景的像素偏移（用于避开侧边栏遮挡） */
+  offset?: [number, number]
+}
 
-  const coordinates: number[][] = []
-  destinations.forEach((dest) => {
-    const coord = fromLonLat(dest.coordinates)
-    coordinates.push(coord)
+function fitBoundsInternal(options: FitBoundsOptions = {}) {
+  if (!map || tripStore.destinations.length === 0) return
+  map.resize()
+
+  const bounds = new LngLatBounds()
+  tripStore.destinations.forEach((dest) => {
+    bounds.extend(dest.coordinates)
   })
 
-  if (coordinates.length > 0) {
-    const extent = vectorSource.getExtent()
-    if (extent && extent[0] !== Infinity) {
-      map.getView().fit(extent, {
-        padding: [50, 50, 50, 50],
-        duration: 1000
-      })
-    }
+  if (tripStore.destinations.length === 1) {
+    const padding = options.padding ?? 50
+    const leftPad = typeof padding === 'number' ? padding : padding.left
+    const rightPad = typeof padding === 'number' ? padding : padding.right
+    const offsetX = options.offset?.[0] ?? Math.round((leftPad - rightPad) / 2)
+    map.easeTo({
+      center: tripStore.destinations[0].coordinates,
+      zoom: Math.max(map.getZoom(), 10),
+      offset: [offsetX, options.offset?.[1] ?? 0],
+      duration: 800
+    })
+    return
   }
+
+  map.fitBounds(bounds, {
+    padding: options.padding ?? 50,
+    duration: options.duration ?? 1000,
+    offset: options.offset
+  })
 }
 
-// 更新地图大小
+function fitBounds(options: FitBoundsOptions = {}) {
+  if (tripStore.destinations.length === 0) return
+  withReady(() => fitBoundsInternal(options))
+}
+
+function flyToLocation(
+  lng: number,
+  lat: number,
+  options?: { offset?: [number, number]; zoom?: number; speed?: number }
+) {
+  withReady(() => {
+    if (!map) return
+    map.flyTo({
+      center: [lng, lat],
+      zoom: options?.zoom ?? Math.max(map.getZoom(), 14),
+      speed: options?.speed ?? 1.2,
+      offset: options?.offset,
+      essential: true
+    })
+  })
+}
+
 function updateSize() {
   if (map) {
-    map.updateSize()
+    map.resize()
   }
 }
 
-// 暴露方法供父组件调用
+function setRouteLineVisible(visible: boolean) {
+  withReady(() => {
+    if (!map) return
+    ensureTripLayers()
+    map.setLayoutProperty(LINE_LAYER_ID, 'visibility', visible ? 'visible' : 'none')
+  })
+}
+
 defineExpose({
   updateMap,
   setMapSelecting,
   onMapClick,
   onFeatureClick,
+  onViewChange,
+  getCenter,
+  getMapCenter,
+  isMapReady,
+  onReady,
+  setHighlightedDay,
+  setRouteLineVisible,
   openPointForm,
   setPanMode,
   zoomIn,
   zoomOut,
   fitBounds,
+  flyToLocation,
   updateSize
 })
 </script>
@@ -618,4 +901,3 @@ defineExpose({
   background-color: #66b1ff;
 }
 </style>
-

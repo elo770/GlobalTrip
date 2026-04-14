@@ -4,7 +4,7 @@
       <div class="welcome-section">
         <h1 class="welcome-title">
           <el-icon><MapLocation /></el-icon>
-          GlobalTrip Planner
+          越陌CROSS
         </h1>
         <p class="welcome-subtitle">创建和管理您的全球旅行路线</p>
       </div>
@@ -74,21 +74,41 @@
 
       <div class="examples-section">
         <h2 class="section-title">示例路线</h2>
-        <el-card class="example-card" shadow="hover" @click="loadExampleRoute">
+        <el-card class="example-card" shadow="hover" @click="loadExampleEuropeRoute">
           <div class="example-card-content">
             <div class="example-icon">
               <el-icon><Star /></el-icon>
             </div>
             <div class="example-info">
-              <h3>改革开放旅行路线</h3>
-              <p>探索中国改革开放的重要城市，从经济特区到金融中心</p>
+              <h3>欧洲自由行</h3>
+              <p>巴黎—阿姆斯特丹—柏林—布拉格—维也纳，经典串联</p>
               <div class="example-details">
-                <span>8 个城市</span>
+                <span>5 个城市</span>
                 <span>•</span>
-                <span>11 天</span>
+                <span>10 天</span>
               </div>
             </div>
-            <el-button type="primary" @click.stop="loadExampleRoute">
+            <el-button type="primary" @click.stop="loadExampleEuropeRoute">
+              加载路线
+            </el-button>
+          </div>
+        </el-card>
+
+        <el-card class="example-card" shadow="hover" @click="loadExampleJiangZheHuRoute" style="margin-top: 16px;">
+          <div class="example-card-content">
+            <div class="example-icon">
+              <el-icon><Star /></el-icon>
+            </div>
+            <div class="example-info">
+              <h3>江浙沪旅游攻略</h3>
+              <p>上海—苏州—杭州—乌镇，江南水乡与城市人文</p>
+              <div class="example-details">
+                <span>4 个目的地</span>
+                <span>•</span>
+                <span>7 天</span>
+              </div>
+            </div>
+            <el-button type="primary" @click.stop="loadExampleJiangZheHuRoute">
               加载路线
             </el-button>
           </div>
@@ -120,12 +140,18 @@ function createNewRoute() {
 }
 
 function viewExampleRoute() {
-  loadExampleRoute()
+  loadExampleEuropeRoute()
 }
 
-function loadExampleRoute() {
-  tripStore.loadPresetRoute('reform-opening')
-  ElMessage.success('已加载示例路线：改革开放旅行路线')
+function loadExampleEuropeRoute() {
+  tripStore.loadPresetRoute('europe-free')
+  ElMessage.success('已加载示例路线：欧洲自由行')
+  router.push('/map')
+}
+
+function loadExampleJiangZheHuRoute() {
+  tripStore.loadPresetRoute('jiangzhehu')
+  ElMessage.success('已加载示例路线：江浙沪旅游攻略')
   router.push('/map')
 }
 
